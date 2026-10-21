@@ -1,0 +1,77 @@
+name: Docker
+
+on:
+  schedule:
+    - cron: "35 3 * * *"
+  push:
+    branches: ["main"]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+env:
+  IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/frankenwp
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # min_php = first release fixed for CVE-2026-109618 / CVE-2026-109619
+          - php: "8.3"
+            min_php: "8.3.36"
+          - php: "8.4"
+            min_php: "8.4.27"
+            latest: true
+          - php: "8.5"
+            min_php: "8.5.12"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build (amd64, local) and check PHP version
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          pull: true
+          tags: frankenwp-check:${{ matrix.php }}
+          platforms: linux/amd64
+          build-args: PHP_VERSION=${{ matrix.php }}
+          cache-from: type=gha,scope=php${{ matrix.php }}
+          cache-to: type=gha,mode=max,scope=php${{ matrix.php }}
+
+      - name: Refuse to publish vulnerable PHP
+        run: |
+          have=$(docker run --rm --entrypoint php frankenwp-check:${{ matrix.php }} -r 'echo PHP_VERSION;')
+          echo "PHP in image: $have (need >= ${{ matrix.min_php }})"
+          [ "$(printf '%s\n%s\n' "${{ matrix.min_php }}" "$have" | sort -V | head -1)" = "${{ matrix.min_php }}" ]
+
+      - name: Tags
+        id: tags
+        run: |
+          t="${IMAGE}:latest-php${{ matrix.php }},${IMAGE}:php${{ matrix.php }}"
+          if [ "${{ matrix.latest }}" = "true" ]; then t="$t,${IMAGE}:latest"; fi
+          echo "list=$t" >> "$GITHUB_OUTPUT"
+
+      - name: Push multi-arch
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.tags.outputs.list }}
+          platforms: linux/amd64,linux/arm64
+          build-args: PHP_VERSION=${{ matrix.php }}
+          cache-from: type=gha,scope=php${{ matrix.php }}
+          cache-to: type=gha,mode=max,scope=php${{ matrix.php }}
